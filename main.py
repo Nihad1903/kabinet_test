@@ -1,8 +1,9 @@
+import secrets
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Cookie, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -17,6 +18,8 @@ DEFAULT_STUDENT_CREDENTIALS = [
     (2, "leyla", "leyla123"),
     (3, "nihad", "nihad123"),
 ]
+
+sessions: dict[str, dict] = {}
 
 
 class LoginRequest(BaseModel):
@@ -111,7 +114,7 @@ def health():
 
 
 @app.post("/login")
-def login(credentials: LoginRequest):
+def login(credentials: LoginRequest, response: Response):
     with closing(get_connection()) as connection:
         student = connection.execute(
             f"""
@@ -125,7 +128,36 @@ def login(credentials: LoginRequest):
     if student is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    return student_to_dict(student)
+    session_id = secrets.token_hex(32)
+    sessions[session_id] = student_to_dict(student)
+    response.set_cookie(
+        key="PHPSESSID",
+        value=session_id,
+        httponly=True,
+        path="/",
+        samesite="lax",
+    )
+    return {"success": True}
+
+
+@app.get("/me")
+def me(phpsessid: str | None = Cookie(default=None, alias="PHPSESSID")):
+    if phpsessid is None or phpsessid not in sessions:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    return sessions[phpsessid]
+
+
+@app.post("/logout")
+def logout(
+    response: Response,
+    phpsessid: str | None = Cookie(default=None, alias="PHPSESSID"),
+):
+    if phpsessid is not None:
+        sessions.pop(phpsessid, None)
+
+    response.delete_cookie(key="PHPSESSID", path="/")
+    return {"success": True}
 
 
 @app.get("/students/{student_id}")

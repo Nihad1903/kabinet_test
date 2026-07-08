@@ -1,8 +1,16 @@
 import "./style.css";
 
-const API_BASE = "/api/v1";
-
 const app = document.getElementById("app");
+
+const fetchOptions = { credentials: "include" };
+
+async function fetchCurrentUser() {
+  const response = await fetch("/me", fetchOptions);
+  if (!response.ok) {
+    return null;
+  }
+  return response.json();
+}
 
 function renderLogin(errorMessage = "") {
   app.innerHTML = `
@@ -82,10 +90,16 @@ function renderDashboard(student) {
     </main>
   `;
 
-  document.getElementById("logout-btn").addEventListener("click", () => {
-    sessionStorage.removeItem("student");
-    renderLogin();
-  });
+  document.getElementById("logout-btn").addEventListener("click", handleLogout);
+}
+
+async function handleLogout() {
+  try {
+    await fetch("/logout", { method: "POST", ...fetchOptions });
+  } catch {
+    // Session may already be invalid; still show login.
+  }
+  renderLogin();
 }
 
 async function handleLogin(event) {
@@ -101,11 +115,12 @@ async function handleLogin(event) {
   submitButton.textContent = "Yoxlanılır...";
 
   try {
-    const response = await fetch(`${API_BASE}/auth/login`, {
+    const response = await fetch("/login", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
+      ...fetchOptions,
       body: JSON.stringify({ username, password }),
     });
 
@@ -115,16 +130,12 @@ async function handleLogin(event) {
       return;
     }
 
-    const loginData = await response.json();
-    const studentResponse = await fetch(`${API_BASE}/students/${loginData.id}`);
-
-    if (!studentResponse.ok) {
+    const student = await fetchCurrentUser();
+    if (!student) {
       renderLogin("Tələbə məlumatları yüklənmədi.");
       return;
     }
 
-    const student = await studentResponse.json();
-    sessionStorage.setItem("student", JSON.stringify(student));
     renderDashboard(student);
   } catch {
     renderLogin("Serverə qoşulmaq mümkün olmadı.");
@@ -134,31 +145,11 @@ async function handleLogin(event) {
   }
 }
 
-async function loadStudentById(studentId) {
-  const response = await fetch(`${API_BASE}/students/${studentId}`);
-
-  if (!response.ok) {
-    sessionStorage.removeItem("student");
-    renderLogin();
+async function bootstrap() {
+  const student = await fetchCurrentUser();
+  if (student) {
+    renderDashboard(student);
     return;
-  }
-
-  const student = await response.json();
-  sessionStorage.setItem("student", JSON.stringify(student));
-  renderDashboard(student);
-}
-
-function bootstrap() {
-  const savedStudent = sessionStorage.getItem("student");
-
-  if (savedStudent) {
-    try {
-      const student = JSON.parse(savedStudent);
-      loadStudentById(student.id);
-      return;
-    } catch {
-      sessionStorage.removeItem("student");
-    }
   }
 
   renderLogin();
