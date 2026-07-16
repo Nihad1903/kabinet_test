@@ -1,14 +1,17 @@
 import { defineConfig } from "vite";
 
+const kabinet = "http://127.0.0.1:8001";
+
 export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      "/login": "http://127.0.0.1:8000",
-      "/logout": "http://127.0.0.1:8000",
-      "/me": "http://127.0.0.1:8000",
-      "/health": "http://127.0.0.1:8000",
-      "/students": "http://127.0.0.1:8000",
+      "/login": kabinet,
+      "/logout": kabinet,
+      "/me": kabinet,
+      "/health": kabinet,
+      "/students": kabinet,
+      "/ai": kabinet,
     },
   },
   build: {

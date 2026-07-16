@@ -1,22 +1,29 @@
+import os
 import secrets
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+import httpx
 from fastapi import Cookie, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 app = FastAPI(title="Kabinet API")
 DATABASE_PATH = Path(__file__).with_name("students.db")
 FRONTEND_DIST = Path(__file__).with_name("frontend").joinpath("dist")
+VIRTUAL_TEACHER_URL = os.getenv("VIRTUAL_TEACHER_URL", "http://127.0.0.1:8000").rstrip(
+    "/"
+)
+VIRTUAL_TEACHER_TOKEN = os.getenv("VIRTUAL_TEACHER_TOKEN", "dev-token")
 
 STUDENT_FIELDS = "id, name, surname, age, group_name, specialty, email, username"
 
-DEFAULT_STUDENT_CREDENTIALS = [
-    (1, "ali", "ali123"),
-    (2, "leyla", "leyla123"),
-    (3, "nihad", "nihad123"),
+DEFAULT_STUDENTS = [
+    (1, "Ali", "Məmmədov", 20, "641a2", "Komputer Elmləri", "ali@azmiu.edu.az", "ali", "ali123"),
+    (2, "Leyla", "Həsənova", 19, "641a2", "Komputer Elmləri", "leyla@azmiu.edu.az", "leyla", "leyla123"),
+    (3, "Nihad", "Quliyev", 21, "642a1", "İnformasiya Texnologiyaları", "nihad@azmiu.edu.az", "nihad", "nihad123"),
 ]
 
 sessions: dict[str, dict] = {}
@@ -25,6 +32,16 @@ sessions: dict[str, dict] = {}
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class AiQueryRequest(BaseModel):
+    question: str
+
+
+def require_session(phpsessid: str | None) -> dict:
+    if phpsessid is None or phpsessid not in sessions:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return sessions[phpsessid]
 
 
 def get_connection():
@@ -72,14 +89,24 @@ def init_database():
             connection.execute("ALTER TABLE students ADD COLUMN username TEXT")
             connection.execute("ALTER TABLE students ADD COLUMN password TEXT")
 
-        for student_id, username, password in DEFAULT_STUDENT_CREDENTIALS:
+        for student in DEFAULT_STUDENTS:
             connection.execute(
                 """
-                UPDATE students
-                SET username = ?, password = ?
-                WHERE id = ? AND (username IS NULL OR username = '' OR password IS NULL OR password = '')
+                INSERT INTO students (
+                    id, name, surname, age, group_name, specialty, email, username, password
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    surname = excluded.surname,
+                    age = excluded.age,
+                    group_name = excluded.group_name,
+                    specialty = excluded.specialty,
+                    email = excluded.email,
+                    username = excluded.username,
+                    password = excluded.password
                 """,
-                (username, password, student_id),
+                student,
             )
 
         connection.commit()
@@ -92,10 +119,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-if FRONTEND_DIST.is_dir():
-    app.frontend("/", directory=str(FRONTEND_DIST))
 
 
 @app.on_event("startup")
@@ -142,10 +165,7 @@ def login(credentials: LoginRequest, response: Response):
 
 @app.get("/me")
 def me(phpsessid: str | None = Cookie(default=None, alias="PHPSESSID")):
-    if phpsessid is None or phpsessid not in sessions:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    return sessions[phpsessid]
+    return require_session(phpsessid)
 
 
 @app.post("/logout")
@@ -172,3 +192,60 @@ def get_student(student_id: int):
         raise HTTPException(status_code=404, detail="Student not found")
 
     return student_to_dict(student)
+
+
+@app.get("/ai/health")
+def ai_health(phpsessid: str | None = Cookie(default=None, alias="PHPSESSID")):
+    require_session(phpsessid)
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            response = client.get(f"{VIRTUAL_TEACHER_URL}/health")
+        if response.status_code != 200:
+            return {"status": "error", "detail": "Virtual Teacher cavab vermir"}
+        return {"status": "ok", "upstream": response.json()}
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Virtual Teacher əlçatan deyil: {exc}",
+        ) from exc
+
+
+@app.post("/ai/query")
+def ai_query(
+    payload: AiQueryRequest,
+    phpsessid: str | None = Cookie(default=None, alias="PHPSESSID"),
+):
+    require_session(phpsessid)
+
+    question = payload.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Sual boş ola bilməz.")
+
+    try:
+        with httpx.Client(timeout=120.0) as client:
+            response = client.post(
+                f"{VIRTUAL_TEACHER_URL}/api/v1/query",
+                json={"question": question},
+                headers={"Authorization": f"Bearer {VIRTUAL_TEACHER_TOKEN}"},
+                cookies={"PHPSESSID": phpsessid},
+            )
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Virtual Teacher əlçatan deyil: {exc}",
+        ) from exc
+
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            detail = response.json().get("detail", detail)
+        except ValueError:
+            pass
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    return response.json()
+
+
+# Mount last so API routes take priority over static files.
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
