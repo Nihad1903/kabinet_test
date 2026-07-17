@@ -12,7 +12,35 @@ async function fetchCurrentUser() {
   return response.json();
 }
 
+function destroyChatbotWidget() {
+  if (window.VirtualTeacherWidget) {
+    window.VirtualTeacherWidget.destroy();
+  }
+}
+
+async function initChatbotWidget() {
+  if (!window.VirtualTeacherWidget) {
+    console.warn("VirtualTeacherWidget yüklənməyib (chatbot.bundle.js).");
+    return;
+  }
+
+  await window.VirtualTeacherWidget.init({
+    apiBaseUrl: window.location.origin,
+    chatEndpoint: "/ai/query",
+    healthEndpoint: "/ai/health",
+    authMode: "credentials",
+    theme: "light",
+    position: "right",
+    title: "Virtual Teacher",
+    assistantName: "AI Müəllim",
+    placeholder: "Sualınızı yazın...",
+    logo: window.location.origin + "/azmiu-logo.png",
+  });
+}
+
 function renderLogin(errorMessage = "") {
+  destroyChatbotWidget();
+
   app.innerHTML = `
     <main class="page">
       <section class="card login-card">
@@ -87,124 +115,15 @@ function renderDashboard(student) {
           </article>
         </div>
       </section>
-
-      <section class="card ai-card">
-        <div class="dashboard-header">
-          <div>
-            <p class="eyebrow">Virtual Teacher</p>
-            <h1>AI müəllim</h1>
-          </div>
-          <span id="ai-status" class="ai-status">yoxlanır...</span>
-        </div>
-
-        <p class="subtitle">Dərs materialları əsasında sual verin.</p>
-
-        <form id="ai-form" class="ai-form">
-          <label>
-            Sualınız
-            <textarea
-              name="question"
-              rows="3"
-              placeholder="Məsələn: Kür çayı haqqında nə deyilir?"
-              required
-            ></textarea>
-          </label>
-          <button type="submit">Göndər</button>
-        </form>
-
-        <div id="ai-result" class="ai-result" hidden>
-          <h2>Cavab</h2>
-          <p id="ai-answer" class="ai-answer"></p>
-          <div id="ai-sources-wrap" hidden>
-            <h3>Mənbələr</h3>
-            <ul id="ai-sources" class="ai-sources"></ul>
-          </div>
-        </div>
-        <p id="ai-error" class="error" hidden></p>
-      </section>
     </main>
   `;
 
   document.getElementById("logout-btn").addEventListener("click", handleLogout);
-  document.getElementById("ai-form").addEventListener("submit", handleAiQuery);
-  checkAiHealth();
-}
-
-async function checkAiHealth() {
-  const statusEl = document.getElementById("ai-status");
-  if (!statusEl) {
-    return;
-  }
-
-  try {
-    const response = await fetch("/ai/health", fetchOptions);
-    if (!response.ok) {
-      statusEl.textContent = "offline";
-      statusEl.classList.add("offline");
-      return;
-    }
-    statusEl.textContent = "online";
-    statusEl.classList.add("online");
-  } catch {
-    statusEl.textContent = "offline";
-    statusEl.classList.add("offline");
-  }
-}
-
-async function handleAiQuery(event) {
-  event.preventDefault();
-
-  const form = event.currentTarget;
-  const submitButton = form.querySelector("button[type='submit']");
-  const question = new FormData(form).get("question").trim();
-  const resultEl = document.getElementById("ai-result");
-  const answerEl = document.getElementById("ai-answer");
-  const sourcesWrap = document.getElementById("ai-sources-wrap");
-  const sourcesEl = document.getElementById("ai-sources");
-  const errorEl = document.getElementById("ai-error");
-
-  errorEl.hidden = true;
-  resultEl.hidden = true;
-  submitButton.disabled = true;
-  submitButton.textContent = "Gözləyin...";
-
-  try {
-    const response = await fetch("/ai/query", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      ...fetchOptions,
-      body: JSON.stringify({ question }),
-    });
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const detail =
-        typeof payload.detail === "string"
-          ? payload.detail
-          : "AI cavab verə bilmədi. Serveri yoxlayın.";
-      errorEl.textContent =
-        response.status === 503
-          ? "Virtual Teacher hələ hazır deyil (modellər yüklənir). 1–2 dəqiqə gözləyib yenidən cəhd edin."
-          : detail;
-      errorEl.hidden = false;
-      return;
-    }
-
-    answerEl.textContent = payload.answer || "Cavab yoxdur.";
-    const sources = Array.isArray(payload.sources) ? payload.sources : [];
-    sourcesEl.innerHTML = sources.map((source) => `<li>${source}</li>`).join("");
-    sourcesWrap.hidden = sources.length === 0;
-    resultEl.hidden = false;
-  } catch {
-    errorEl.textContent = "Virtual Teacher-ə qoşulmaq mümkün olmadı.";
-    errorEl.hidden = false;
-  } finally {
-    submitButton.disabled = false;
-    submitButton.textContent = "Göndər";
-  }
+  initChatbotWidget();
 }
 
 async function handleLogout() {
+  destroyChatbotWidget();
   try {
     await fetch("/logout", { method: "POST", ...fetchOptions });
   } catch {

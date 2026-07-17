@@ -1,11 +1,15 @@
+import json
+import logging
 import os
 import secrets
 import sqlite3
+import time
 from contextlib import closing
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import httpx
-from fastapi import Cookie, FastAPI, HTTPException, Response
+from fastapi import Cookie, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -13,6 +17,7 @@ from pydantic import BaseModel
 app = FastAPI(title="Kabinet API")
 DATABASE_PATH = Path(__file__).with_name("students.db")
 FRONTEND_DIST = Path(__file__).with_name("frontend").joinpath("dist")
+LOGS_DIR = Path(__file__).with_name("logs")
 VIRTUAL_TEACHER_URL = os.getenv("VIRTUAL_TEACHER_URL", "http://127.0.0.1:8000").rstrip(
     "/"
 )
@@ -27,6 +32,46 @@ DEFAULT_STUDENTS = [
 ]
 
 sessions: dict[str, dict] = {}
+
+
+def setup_ai_logger() -> logging.Logger:
+    """
+    Sorğu izləmə jurnalı — logs/ai_queries.log
+    Hər sətir bir JSON obyektidir (JSON Lines formatı), asan parse olunur:
+      tail -f logs/ai_queries.log | jq .
+    """
+    LOGS_DIR.mkdir(exist_ok=True)
+    logger = logging.getLogger("kabinet.ai")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(
+        LOGS_DIR / "ai_queries.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+ai_logger = setup_ai_logger()
+
+
+def log_ai_event(event: str, user: dict | None, request: Request, **extra) -> None:
+    """Kimin sorğu göndərdiyini sessiyadan (PHPSESSID) götürüb jurnala yazır."""
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "event": event,
+        "user_id": user.get("id") if user else None,
+        "username": user.get("username") if user else None,
+        "ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+    }
+    record.update(extra)
+    ai_logger.info(json.dumps(record, ensure_ascii=False))
 
 
 class LoginRequest(BaseModel):
@@ -195,8 +240,16 @@ def get_student(student_id: int):
 
 
 @app.get("/ai/health")
-def ai_health(phpsessid: str | None = Cookie(default=None, alias="PHPSESSID")):
-    require_session(phpsessid)
+def ai_health(
+    request: Request,
+    phpsessid: str | None = Cookie(default=None, alias="PHPSESSID"),
+):
+    try:
+        user = require_session(phpsessid)
+    except HTTPException:
+        log_ai_event("health_unauthorized", None, request)
+        raise
+    log_ai_event("health_check", user, request)
     try:
         with httpx.Client(timeout=5.0) as client:
             response = client.get(f"{VIRTUAL_TEACHER_URL}/health")
@@ -213,13 +266,23 @@ def ai_health(phpsessid: str | None = Cookie(default=None, alias="PHPSESSID")):
 @app.post("/ai/query")
 def ai_query(
     payload: AiQueryRequest,
+    request: Request,
     phpsessid: str | None = Cookie(default=None, alias="PHPSESSID"),
 ):
-    require_session(phpsessid)
+    try:
+        user = require_session(phpsessid)
+    except HTTPException:
+        # Sessiyasız cəhdlər də izlənir (kim icazəsiz müraciət edib)
+        log_ai_event("query_unauthorized", None, request)
+        raise
 
     question = payload.question.strip()
     if not question:
+        log_ai_event("query_empty", user, request)
         raise HTTPException(status_code=400, detail="Sual boş ola bilməz.")
+
+    started = time.monotonic()
+    log_ai_event("query_started", user, request, question=question)
 
     try:
         with httpx.Client(timeout=120.0) as client:
@@ -230,10 +293,20 @@ def ai_query(
                 cookies={"PHPSESSID": phpsessid},
             )
     except httpx.RequestError as exc:
+        log_ai_event(
+            "query_upstream_unreachable",
+            user,
+            request,
+            question=question,
+            error=str(exc),
+            duration_ms=round((time.monotonic() - started) * 1000),
+        )
         raise HTTPException(
             status_code=503,
             detail=f"Virtual Teacher əlçatan deyil: {exc}",
         ) from exc
+
+    duration_ms = round((time.monotonic() - started) * 1000)
 
     if response.status_code >= 400:
         detail = response.text
@@ -241,9 +314,28 @@ def ai_query(
             detail = response.json().get("detail", detail)
         except ValueError:
             pass
+        log_ai_event(
+            "query_failed",
+            user,
+            request,
+            question=question,
+            status=response.status_code,
+            detail=str(detail)[:500],
+            duration_ms=duration_ms,
+        )
         raise HTTPException(status_code=response.status_code, detail=detail)
 
-    return response.json()
+    result = response.json()
+    log_ai_event(
+        "query_answered",
+        user,
+        request,
+        question=question,
+        answer_preview=str(result.get("answer", ""))[:200],
+        sources=result.get("sources", []),
+        duration_ms=duration_ms,
+    )
+    return result
 
 
 # Mount last so API routes take priority over static files.
